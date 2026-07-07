@@ -1,8 +1,23 @@
 # claude-session-log
 
 Personal Claude Code plugin. Keeps a project's `SESSION_LOG.md` from going
-stale during long or multi-agent sessions, per the "maintain a durable
-handoff log" convention described in the global `CLAUDE.md`.
+stale during long or multi-agent sessions.
+
+This repo ships two things, not one:
+
+- **[`docs/convention.md`](docs/convention.md)** — the actual `SESSION_LOG.md`
+  convention: why it exists, what triggers an update, and the required file
+  structure. This is the part that survives compaction and quota cutoffs —
+  put it (or an `@docs/convention.md` import) in your `CLAUDE.md` for it to
+  do anything.
+- **The two hooks below** — enforcement. They don't define the convention or
+  write the file; they just notice when a moment that should trigger an
+  update (a commit, a new spec) went by without one, and say so.
+
+Neither half does much without the other: the convention with no hooks is
+just an instruction that fades from context under load (see below); the
+hooks with no convention have nothing telling them, or Claude, what a
+correctly-shaped log entry even looks like.
 
 ## The problem this solves
 
@@ -115,3 +130,15 @@ Or add manually to `~/.claude/settings.json`:
   }
 }
 ```
+
+Then wire in the convention itself — the hooks are inert noise without it.
+Add to your `CLAUDE.md` (global `~/.claude/CLAUDE.md` for every project, or
+a specific project's):
+
+```
+Maintain SESSION_LOG.md per docs/convention.md in the claude-session-log
+plugin (github.com/xxdesmus/claude-session-log).
+```
+
+or paste `docs/convention.md`'s content in directly if you want it
+self-contained without a cross-reference.
