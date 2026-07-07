@@ -83,64 +83,29 @@ happen.
 ## Data flow
 
 ```
-                    Claude Code tool call happens
-                    (Bash, or Write/Edit)
-                              │
-                              ▼
-              ┌───────────────────────────────┐
-              │  PostToolUse hook fires,       │
-              │  tool-call JSON piped on stdin │
-              └───────────────┬────────────────┘
-                               │
-                 ┌─────────────┴─────────────┐
-                 ▼                            ▼
-       matcher: Bash                matcher: Write|Edit
-   session-log-commit-reminder.sh   session-log-spec-reminder.sh
-                 │                            │
-   bash substring test on raw        bash substring test on raw
-   stdin: 'git commit'/'git merge'?  stdin: docs/superpowers/{specs,plans}/?
-                 │                            │
-        no ──────┼────── exit 0 (silent)      │
-                 │                            no ── exit 0 (silent)
-                yes                           │
-                 │                           yes
-                 ▼                            │
-   jq: extract .tool_input.command            ▼
-                 │              jq: extract .tool_input.file_path
-   grep -E 'git (commit|merge)\b'   (or .tool_response.filePath)
-                 │                            │
-        no ── exit 0 (silent)        confirm path matches
-                 │                    specs/ or plans/ glob
-                yes                            │
-                 │                    no ── exit 0 (silent)
-   git rev-parse --is-inside-work-tree?        │
-                 │                            yes
-        no ── exit 0 (silent)                  │
-                 │                              ▼
-                yes                  emit hookSpecificOutput JSON:
-                 ▼                   "a spec/plan file was written,
-   git show -1 --name-only HEAD      note it in SESSION_LOG.md"
-                 │                            │
-   did it include SESSION_LOG.md?             │
-                 │                            │
-        yes ── exit 0 (silent)                │
-                 │                            │
-                no                             │
-                 ▼                            │
-   emit hookSpecificOutput JSON:               │
-   "commit/merge landed without                │
-   touching SESSION_LOG.md"                    │
-                 │                            │
-                 └─────────────┬──────────────┘
-                                ▼
-              additionalContext string is injected
-              back into Claude's context for this turn
+  Claude runs a tool (git commit, or Write/Edit)
+                    │
+                    ▼
+        PostToolUse hook fires
+                    │
+                    ▼
+    trigger moment? (commit missing the
+    log, or a new spec/plan written)
+         │                  │
+         no                yes
+         │                  │
+         ▼                  ▼
+      silent          additionalContext reminder
+      (exit 0)        injected into Claude's context
                                 │
                                 ▼
-              Claude reads the reminder, updates
-              SESSION_LOG.md per docs/convention.md
-              (or ignores it if already current)
+                    Claude updates SESSION_LOG.md
 ```
+
+Two scripts, same shape: `session-log-commit-reminder.sh` watches `Bash`
+calls for `git commit`/`git merge`; `session-log-spec-reminder.sh` watches
+`Write`/`Edit` calls for `docs/superpowers/{specs,plans}/`. Full per-check
+logic is in the scripts themselves — both under 15 lines.
 
 ## Why this is the right shape for the problem
 
