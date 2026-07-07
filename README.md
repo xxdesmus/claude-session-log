@@ -1,113 +1,108 @@
 # claude-session-log
 
-Personal Claude Code plugin. Keeps a project's `SESSION_LOG.md` from going
-stale during long or multi-agent sessions.
+A Claude Code plugin built to fix one specific, observed failure:
+`SESSION_LOG.md` — a project's durable handoff file — goes stale mid-session,
+because nothing actually enforces the "keep it updated" instruction once
+real work starts.
 
-This repo ships two things, not one:
+## The problem
 
-- **[`docs/convention.md`](docs/convention.md)** — the actual `SESSION_LOG.md`
-  convention: why it exists, what triggers an update, and the required file
-  structure. This is the part that survives compaction and quota cutoffs —
-  put it (or an `@docs/convention.md` import) in your `CLAUDE.md` for it to
-  do anything.
-- **The two hooks below** — enforcement. They don't define the convention or
-  write the file; they just notice when a moment that should trigger an
-  update (a commit, a new spec) went by without one, and say so.
+Claude Code sessions lose memory in three ways, none of which the model
+controls:
 
-Neither half does much without the other: the convention with no hooks is
-just an instruction that fades from context under load (see below); the
-hooks with no convention have nothing telling them, or Claude, what a
-correctly-shaped log entry even looks like.
+- **Compaction.** Once the conversation nears the context limit, older turns
+  get summarized. Detail survives only as much as the summary keeps it —
+  usually "what changed," rarely "why," almost never "what's still broken."
+- **API quota / rate limits.** A session can stop mid-task and resume later,
+  possibly as a different model, with nothing but whatever compaction left
+  behind.
+- **Interruption.** The terminal closes, the user switches machines, or a
+  different session picks up the same repo later.
 
-## The problem this solves
+`SESSION_LOG.md` — a plain file, committed to the repo, updated in place —
+is the fix for all three: compaction can't touch it, quota exhaustion
+doesn't erase it, and any model with zero prior context can `cat` it and
+resume immediately.
 
-`CLAUDE.md` can tell Claude "keep `SESSION_LOG.md` current" all it wants, but
-that instruction is just prose sitting in context. It competes with
-everything else Claude is holding in its head, and it silently loses:
+But telling Claude "maintain this file" in `CLAUDE.md` doesn't hold up on
+its own. That instruction is prose competing for attention with everything
+else in context, and it loses predictably:
 
-- **Long multi-step builds.** A nine-task feature built via subagents will
-  update `SESSION_LOG.md` after task one, then the controller's attention
-  moves to dispatching implementers, reviewing diffs, and fixing bugs —
-  and the log is still describing task one's state three hours and twenty
-  commits later.
-- **Compaction and session handoff.** Once context is summarized or a new
-  session picks up the work, there's no forcing function left telling
-  Claude "by the way, go write down what happened."
-- **Subagents in worktrees.** A subagent implementing a task in an isolated
-  worktree has no reason to know `SESSION_LOG.md` exists at all, let alone
+- **Long multi-step builds.** A nine-task feature built via subagents
+  updates the log after task one, then attention moves to dispatching
+  implementers, reviewing diffs, fixing bugs — and the log is still
+  describing task one's state three hours and twenty commits later.
+- **Session handoff.** Once context is summarized or a new session picks up
+  the work, nothing re-raises "go write down what happened."
+- **Subagents in worktrees.** A subagent implementing one task in an
+  isolated worktree has no reason to know `SESSION_LOG.md` exists, let alone
   update it.
 
-This isn't hypothetical — it's what actually happened in the session this
-plugin was built in: a full feature (spec → plan → 9 implementation tasks →
+This isn't hypothetical — it's what prompted this repo. In the session that
+built this plugin, a full feature (spec → plan → 9 implementation tasks →
 review → merge) landed with `SESSION_LOG.md` stuck describing task one's
 state the entire time. The user caught it by asking "is the session log up
-to date?" The honest answer was no.
+to date?" The honest answer was no. Asking Claude to "just remember better"
+doesn't fix this — the failure isn't a lapse in judgment on one turn, it's
+that nothing in the environment ever re-raises the reminder at the moments
+that matter.
 
-Asking Claude to "just remember to update the log more often" doesn't fix
-this, because the failure isn't a lapse in judgment on any single turn —
-it's that nothing in the environment ever re-raises the reminder at the
-moments that matter.
+## The fix: enforcement, not another instruction
 
-## How it works
+This repo has two parts, and neither does much alone:
 
-Two `PostToolUse` hooks — small, boring shell scripts, not another LLM call:
+- **[`docs/convention.md`](docs/convention.md)** — the actual
+  `SESSION_LOG.md` convention: why it exists, what triggers an update, the
+  required file structure. Put this (or a reference to it) in `CLAUDE.md` —
+  it's the part a model actually reads to know what a correct log entry
+  looks like.
+- **Two `PostToolUse` hooks** — enforcement. They don't write the file or
+  define its shape; they watch for the two moments an update is most likely
+  to be forgotten, and say so when it was:
+  - **`session-log-commit-reminder.sh`** (matcher: `Bash`) — after any `git
+    commit`/`git merge`, checks whether `SESSION_LOG.md` was part of that
+    commit via `git show --stat -1 --name-only HEAD`. If not, injects a
+    reminder as `hookSpecificOutput.additionalContext`.
+  - **`session-log-spec-reminder.sh`** (matcher: `Write|Edit`) — after any
+    write to `docs/superpowers/specs/*` or `docs/superpowers/plans/*`
+    (i.e. a new body of work starting), injects a reminder to note it.
 
-- **`session-log-commit-reminder.sh`** (matcher: `Bash`) — runs after every
-  Bash tool call. It only acts if the command text matches `git commit` or
-  `git merge`. If it does, it runs `git show --stat -1 --name-only HEAD` and
-  checks whether `SESSION_LOG.md` is in that commit's file list. If the log
-  wasn't touched, it returns a `hookSpecificOutput.additionalContext` message
-  that gets injected straight back into Claude's context: a reminder, not a
-  block.
-- **`session-log-spec-reminder.sh`** (matcher: `Write|Edit`) — runs after
-  every file write/edit. It only acts if the path is under
-  `docs/superpowers/specs/` or `docs/superpowers/plans/` — i.e. the moment a
-  new design or implementation plan is committed to disk, which is exactly
-  when a fresh body of work is starting and is worth a durable note.
+Both are read-only and non-blocking — they inspect state and emit context,
+never `"decision": "block"`. No match, no output, no cost.
 
-Both hooks are read-only and non-blocking: they inspect state and emit
-context, they never set `"decision": "block"`. If a commit already touched
-the log, or the write isn't a spec/plan, the hook exits 0 with no output and
-costs nothing.
+The mechanism is structural, not behavioral: hooks fire on tool-call
+*events*, deterministically, regardless of what Claude is currently focused
+on. There's no way for "got busy with task 4" to suppress an event a hook is
+watching for — which is exactly the gap that let the real incident above
+happen.
 
-The mechanism that makes this work is structural, not behavioral: hooks fire
-on tool-call *events*, deterministically, regardless of what Claude is
-currently thinking about. There's no way for "got busy with task 4" to
-suppress an event a hook is watching for.
+## Why this is the right shape for the problem
 
-## Why this over the alternatives
-
-- **Vs. relying on the instruction alone (status quo):** an instruction in
-  `CLAUDE.md` is advice Claude tries to remember. A hook is code that runs.
-  The whole point is moving the reminder out of "things the model has to
-  keep proactively re-noticing" and into "things the harness enforces on
-  every matching event," which is exactly the gap that caused the real
-  incident above.
-- **Vs. a `Stop` hook that checks at the end of every turn:** far noisier —
-  it would fire after every single response, most of which don't touch git
-  or specs at all, drowning the signal. Scoping to `Bash`/`Write|Edit` with a
-  content check means the reminder only appears at the two moments it's
-  actually relevant.
-- **Vs. an `agent`-type hook that re-writes the log automatically:** tempting,
-  but wrong trust boundary — an LLM call writing to a durable project file
-  on every commit is slower, costs tokens on every single commit whether or
-  not one is needed, and risks silently overwriting log content with a worse
-  summary than a human-directed update would produce. A plain reminder keeps
-  a human (or the primary agent, deliberately) in control of what actually
-  gets written.
-- **Vs. copy-pasting the two shell scripts into every project's
-  `.claude/settings.json`:** works, but drifts — a fix or improvement to one
-  copy doesn't reach the others. Packaging as a plugin with its own repo
-  means every machine/project that installs it gets the same version, and
-  updates propagate by just bumping the marketplace.
-- **Vs. a full marketplace submission to the official plugin registry:**
-  this is a narrow, personal convention (tied to this user's specific
-  `CLAUDE.md` session-log rule), not a general-purpose tool — publishing it
-  publicly as a listed plugin would be presenting a personal workflow
-  preference as broadly-endorsed practice. A public-but-unlisted repo gets
-  the reuse-across-machines benefit without that.
-
-Both hooks are advisory only (they emit `additionalContext`, never block).
+- **Vs. the instruction alone:** an instruction in `CLAUDE.md` is advice a
+  model tries to remember. A hook is code that runs. This moves the
+  reminder out of "things the model has to keep proactively re-noticing"
+  and into "things the harness enforces on every matching event."
+- **Vs. a `Stop` hook checked every turn:** far noisier — it would fire
+  after every response, most of which touch neither git nor specs,
+  drowning the signal. Scoping to `Bash`/`Write|Edit` with a content check
+  means the reminder only appears at the two moments it's actually
+  relevant.
+- **Vs. an `agent`-type hook that rewrites the log automatically:**
+  tempting, but the wrong trust boundary — an LLM call writing to a durable
+  project file on every commit is slower, spends tokens whether or not an
+  update is even needed, and risks silently overwriting good log content
+  with a worse auto-summary. A plain reminder keeps a human (or the primary
+  agent, deliberately) in control of what actually gets written.
+- **Vs. copy-pasting the two scripts into each project's
+  `.claude/settings.json`:** works once, then drifts — a fix to one copy
+  never reaches the others. A plugin with its own repo means every
+  machine/project that installs it gets the same version, and improvements
+  propagate by bumping the marketplace.
+- **Vs. publishing to the official plugin marketplace:** this encodes one
+  person's specific `SESSION_LOG.md` convention, not a general-purpose
+  tool — listing it publicly would present a personal workflow preference
+  as broadly-endorsed practice. A public-but-unlisted repo gets the
+  reuse-across-machines benefit without that.
 
 ## Install
 
@@ -131,14 +126,14 @@ Or add manually to `~/.claude/settings.json`:
 }
 ```
 
-Then wire in the convention itself — the hooks are inert noise without it.
-Add to your `CLAUDE.md` (global `~/.claude/CLAUDE.md` for every project, or
-a specific project's):
+Then wire in the convention itself — the hooks are inert without it. Add to
+`CLAUDE.md` (global `~/.claude/CLAUDE.md` for every project, or a specific
+project's):
 
 ```
 Maintain SESSION_LOG.md per docs/convention.md in the claude-session-log
 plugin (github.com/xxdesmus/claude-session-log).
 ```
 
-or paste `docs/convention.md`'s content in directly if you want it
-self-contained without a cross-reference.
+or paste `docs/convention.md`'s content in directly for something
+self-contained, with no cross-repo reference.
