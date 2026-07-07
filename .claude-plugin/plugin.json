@@ -1,0 +1,30 @@
+{
+  "name": "claude-session-log",
+  "description": "Nudges Claude to keep a durable SESSION_LOG.md current: reminds after any git commit/merge that doesn't touch it, and after any spec/plan file is written.",
+  "author": {
+    "name": "Justin Paine",
+    "url": "https://github.com/xxdesmus"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-log-commit-reminder.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-log-spec-reminder.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

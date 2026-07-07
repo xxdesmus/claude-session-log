@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-session-log",
+  "description": "Personal marketplace for the claude-session-log plugin.",
+  "owner": {
+    "name": "Justin Paine",
+    "url": "https://github.com/xxdesmus"
+  },
+  "plugins": [
+    {
+      "name": "claude-session-log",
+      "description": "Reminders to keep SESSION_LOG.md current after commits/merges and spec/plan writes.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
