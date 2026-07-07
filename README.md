@@ -61,20 +61,86 @@ This repo has two parts, and neither does much alone:
   to be forgotten, and say so when it was:
   - **`session-log-commit-reminder.sh`** (matcher: `Bash`) — after any `git
     commit`/`git merge`, checks whether `SESSION_LOG.md` was part of that
-    commit via `git show --stat -1 --name-only HEAD`. If not, injects a
+    commit via `git show -1 --name-only HEAD`. If not, injects a
     reminder as `hookSpecificOutput.additionalContext`.
   - **`session-log-spec-reminder.sh`** (matcher: `Write|Edit`) — after any
     write to `docs/superpowers/specs/*` or `docs/superpowers/plans/*`
     (i.e. a new body of work starting), injects a reminder to note it.
 
 Both are read-only and non-blocking — they inspect state and emit context,
-never `"decision": "block"`. No match, no output, no cost.
+never `"decision": "block"`. No match, no output, no cost. Both also
+pre-filter on the raw tool-call JSON with a plain bash substring test before
+ever spawning `jq` — since these hooks fire on *every* matching tool call,
+the common case (a Bash call that isn't a commit, a Write that isn't a spec)
+should cost nothing but a string comparison.
 
 The mechanism is structural, not behavioral: hooks fire on tool-call
 *events*, deterministically, regardless of what Claude is currently focused
 on. There's no way for "got busy with task 4" to suppress an event a hook is
 watching for — which is exactly the gap that let the real incident above
 happen.
+
+## Data flow
+
+```
+                    Claude Code tool call happens
+                    (Bash, or Write/Edit)
+                              │
+                              ▼
+              ┌───────────────────────────────┐
+              │  PostToolUse hook fires,       │
+              │  tool-call JSON piped on stdin │
+              └───────────────┬────────────────┘
+                               │
+                 ┌─────────────┴─────────────┐
+                 ▼                            ▼
+       matcher: Bash                matcher: Write|Edit
+   session-log-commit-reminder.sh   session-log-spec-reminder.sh
+                 │                            │
+   bash substring test on raw        bash substring test on raw
+   stdin: 'git commit'/'git merge'?  stdin: docs/superpowers/{specs,plans}/?
+                 │                            │
+        no ──────┼────── exit 0 (silent)      │
+                 │                            no ── exit 0 (silent)
+                yes                           │
+                 │                           yes
+                 ▼                            │
+   jq: extract .tool_input.command            ▼
+                 │              jq: extract .tool_input.file_path
+   grep -E 'git (commit|merge)\b'   (or .tool_response.filePath)
+                 │                            │
+        no ── exit 0 (silent)        confirm path matches
+                 │                    specs/ or plans/ glob
+                yes                            │
+                 │                    no ── exit 0 (silent)
+   git rev-parse --is-inside-work-tree?        │
+                 │                            yes
+        no ── exit 0 (silent)                  │
+                 │                              ▼
+                yes                  emit hookSpecificOutput JSON:
+                 ▼                   "a spec/plan file was written,
+   git show -1 --name-only HEAD      note it in SESSION_LOG.md"
+                 │                            │
+   did it include SESSION_LOG.md?             │
+                 │                            │
+        yes ── exit 0 (silent)                │
+                 │                            │
+                no                             │
+                 ▼                            │
+   emit hookSpecificOutput JSON:               │
+   "commit/merge landed without                │
+   touching SESSION_LOG.md"                    │
+                 │                            │
+                 └─────────────┬──────────────┘
+                                ▼
+              additionalContext string is injected
+              back into Claude's context for this turn
+                                │
+                                ▼
+              Claude reads the reminder, updates
+              SESSION_LOG.md per docs/convention.md
+              (or ignores it if already current)
+```
 
 ## Why this is the right shape for the problem
 
